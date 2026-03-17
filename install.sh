@@ -485,42 +485,54 @@ draw_conflict_options() {
   done
 }
 
-# ─── Source metadata ─────────────────────────────────────────────────
-# .source file records where a copied skill came from, for --update
-SOURCE_FILE=".source"
+# ─── Registry ────────────────────────────────────────────────────────
+# Central config at ~/.config/agent-skills/registry.tsv
+# Format: skill<TAB>source<TAB>dest<TAB>method<TAB>timestamp
+REGISTRY_DIR="$HOME/.config/agent-skills"
+REGISTRY_FILE="$REGISTRY_DIR/registry.tsv"
 
-write_source_meta() {
-  local dest="$1" src="$2" method="$3"
-  cat > "$dest/$SOURCE_FILE" <<METAEOF
-source=$src
-method=$method
-installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-METAEOF
+ensure_registry() {
+  mkdir -p "$REGISTRY_DIR"
+  [[ -f "$REGISTRY_FILE" ]] || touch "$REGISTRY_FILE"
 }
 
-read_source_meta() {
-  local meta_file="$1/$SOURCE_FILE"
-  if [[ -f "$meta_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$meta_file"
-    printf '%s' "$source"
-  fi
+# Add or update a record (upsert by dest path)
+registry_upsert() {
+  local skill="$1" src="$2" dest="$3" method="$4"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ensure_registry
+
+  # Remove existing entry with same dest, then append
+  local tmp="$REGISTRY_FILE.tmp"
+  grep -v "	${dest}	" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\t%s\n' "$skill" "$src" "$dest" "$method" "$ts" >> "$tmp"
+  mv "$tmp" "$REGISTRY_FILE"
+}
+
+# Remove a record by dest path
+registry_remove() {
+  local dest="$1"
+  ensure_registry
+  local tmp="$REGISTRY_FILE.tmp"
+  grep -v "	${dest}	" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
+  mv "$tmp" "$REGISTRY_FILE"
 }
 
 # ─── Install logic ──────────────────────────────────────────────────
 do_install() {
-  local src="$1" dest="$2"
+  local skill="$1" src="$2" dest="$3"
   if [[ "$INSTALL_METHOD" == "symlink" ]]; then
     ln -s "$src" "$dest"
   else
     cp -R "$src" "$dest"
-    write_source_meta "$dest" "$src" "copy"
   fi
+  registry_upsert "$skill" "$src" "$dest" "$INSTALL_METHOD"
 }
 
 # Update: copy changed + new files from src into dest, keep extra files in dest
 do_update() {
-  local src="$1" dest="$2"
+  local skill="$1" src="$2" dest="$3"
 
   # For symlink dest, remove the link first and copy fresh
   if [[ -L "$dest" ]]; then
@@ -538,7 +550,7 @@ do_update() {
     cp "$f" "$dest_file"
   done < <(find "$src" -type f 2>/dev/null)
 
-  write_source_meta "$dest" "$src" "copy"
+  registry_upsert "$skill" "$src" "$dest" "copy"
 }
 
 install_skills() {
@@ -573,13 +585,13 @@ install_skills() {
           print_info "$skill — skipped"
           ;;
         1) # Update
-          do_update "$src" "$dest"
+          do_update "$skill" "$src" "$dest"
           print_success "$skill — updated"
           (( count++ ))
           ;;
         2) # Reinstall
           rm -rf "$dest"
-          do_install "$src" "$dest"
+          do_install "$skill" "$src" "$dest"
           print_success "$skill — reinstalled"
           (( count++ ))
           ;;
@@ -587,7 +599,7 @@ install_skills() {
       continue
     fi
 
-    do_install "$src" "$dest"
+    do_install "$skill" "$src" "$dest"
     print_success "$skill — installed"
     (( count++ ))
   done
@@ -601,90 +613,124 @@ install_skills() {
 }
 
 # ─── Update command ──────────────────────────────────────────────────
-# Scan all known target dirs for skills with .source metadata,
-# then update them from the recorded source path.
+# Read registry, find copy-installed skills, sync from source.
 run_update() {
+  ensure_registry
   print_header
-  printf "  ${BOLD}Scanning for installed skills...${RESET}\n\n"
+  printf "  ${BOLD}Scanning registry...${RESET}\n\n"
 
   local found=0 updated=0
 
-  # Collect all target dirs to scan
-  local scan_dirs=()
-  if [[ -n "$INSTALL_DIR" ]]; then
-    scan_dirs+=("$INSTALL_DIR")
-  else
-    for entry in "${ALL_TARGETS[@]}"; do
-      local cli_name display detect skills
-      IFS='|' read -r cli_name display detect skills <<< "$entry"
-      [[ -d "$skills" ]] && scan_dirs+=("$skills")
-    done
+  # Parse registry entries with awk
+  # Output: skill|source|dest|method  (one per line)
+  if [[ ! -s "$REGISTRY_FILE" ]]; then
+    print_warn "Registry is empty. Install skills first."
+    printf "\n"
+    return
   fi
 
-  if [[ ${#scan_dirs[@]} -eq 0 ]]; then
-    print_warn "No skill directories found."
-    exit 0
-  fi
+  while IFS=$'\t' read -r skill src dest method ts; do
+    [[ -z "$skill" ]] && continue
 
-  for dir in "${scan_dirs[@]}"; do
-    # Find skill dirs with .source file
-    for skill_dir in "$dir"/*/; do
-      [[ -d "$skill_dir" ]] || continue
-      local meta_file="$skill_dir$SOURCE_FILE"
-      [[ -f "$meta_file" ]] || continue
+    # Filter by --target / --path if specified
+    if [[ -n "$INSTALL_DIR" ]]; then
+      local dest_parent
+      dest_parent="$(dirname "$dest")"
+      [[ "$dest_parent" != "$INSTALL_DIR" ]] && continue
+    fi
 
-      local source="" method="" installed=""
-      # shellcheck disable=SC1090
-      source "$meta_file"
-      local src_path="$source"
+    local short_dest="${dest/#$HOME/~}"
 
-      local skill_name
-      skill_name="$(basename "$skill_dir")"
-      local short_dir="${dir/#$HOME/~}"
-
+    # Symlinked skills: just verify link is valid
+    if [[ "$method" == "symlink" ]]; then
+      if [[ -L "$dest" ]]; then
+        print_info "$skill ($short_dest) — symlinked, git pull to update"
+      else
+        print_warn "$skill ($short_dest) — symlink broken or removed"
+      fi
       (( found++ ))
+      continue
+    fi
 
-      if [[ ! -d "$src_path" ]]; then
-        print_warn "$skill_name (${short_dir}) — source missing: $src_path"
-        continue
+    # Copy-installed skills: check for changes and sync
+    (( found++ ))
+
+    if [[ ! -d "$src" ]]; then
+      print_warn "$skill ($short_dest) — source missing: $src"
+      continue
+    fi
+
+    if [[ ! -d "$dest" ]]; then
+      print_warn "$skill ($short_dest) — dest missing, re-run install"
+      continue
+    fi
+
+    # Check if there are changes
+    local has_diff=false
+    while IFS= read -r f; do
+      local rel="${f#$src/}"
+      if [[ ! -e "$dest/$rel" ]] || ! diff -q "$f" "$dest/$rel" &>/dev/null; then
+        has_diff=true
+        break
       fi
+    done < <(find "$src" -type f 2>/dev/null)
 
-      # Check if there are changes
-      local has_diff=false
-      while IFS= read -r f; do
-        local rel="${f#$src_path/}"
-        if [[ ! -e "${skill_dir}${rel}" ]] || ! diff -q "$f" "${skill_dir}${rel}" &>/dev/null; then
-          has_diff=true
-          break
-        fi
-      done < <(find "$src_path" -type f 2>/dev/null)
+    if ! $has_diff; then
+      print_info "$skill ($short_dest) — already up to date"
+      continue
+    fi
 
-      if ! $has_diff; then
-        print_info "$skill_name (${short_dir}) — already up to date"
-        continue
-      fi
+    # Apply update
+    while IFS= read -r f; do
+      local rel="${f#$src/}"
+      local dest_file="$dest/$rel"
+      mkdir -p "$(dirname "$dest_file")"
+      cp "$f" "$dest_file"
+    done < <(find "$src" -type f 2>/dev/null)
 
-      # Apply update
-      while IFS= read -r f; do
-        local rel="${f#$src_path/}"
-        local dest_file="${skill_dir}${rel}"
-        mkdir -p "$(dirname "$dest_file")"
-        cp "$f" "$dest_file"
-      done < <(find "$src_path" -type f 2>/dev/null)
-
-      write_source_meta "${skill_dir%/}" "$src_path" "copy"
-      print_success "$skill_name (${short_dir}) — updated"
-      (( updated++ ))
-    done
-  done
+    registry_upsert "$skill" "$src" "$dest" "copy"
+    print_success "$skill ($short_dest) — updated"
+    (( updated++ ))
+  done < "$REGISTRY_FILE"
 
   if [[ $found -eq 0 ]]; then
-    print_warn "No copied skills with source tracking found."
-    printf "  ${DIM}Only skills installed with --method copy have update tracking.${RESET}\n"
-    printf "  ${DIM}Symlinked skills update automatically via git pull.${RESET}\n\n"
+    print_warn "No matching skills found in registry."
   else
-    printf "\n  ${BOLD}${GREEN}Done!${RESET} ${BOLD}${updated}${RESET}/${BOLD}${found}${RESET} skill(s) updated.\n\n"
+    printf "\n  ${BOLD}${GREEN}Done!${RESET} ${BOLD}${updated}${RESET}/${BOLD}${found}${RESET} skill(s) updated.\n"
   fi
+  printf "\n"
+}
+
+# ─── Status command ──────────────────────────────────────────────────
+run_status() {
+  ensure_registry
+  print_header
+
+  if [[ ! -s "$REGISTRY_FILE" ]]; then
+    print_warn "No skills installed."
+    printf "\n"
+    return
+  fi
+
+  printf "  ${BOLD}Installed skills${RESET} ${DIM}(${REGISTRY_FILE/#$HOME/~})${RESET}\n\n"
+
+  while IFS=$'\t' read -r skill src dest method ts; do
+    [[ -z "$skill" ]] && continue
+    local short_dest="${dest/#$HOME/~}"
+    local short_src="${src/#$HOME/~}"
+    local status_icon="${GREEN}✓${RESET}"
+
+    if [[ "$method" == "symlink" && ! -L "$dest" ]]; then
+      status_icon="${RED}✗${RESET}"
+    elif [[ "$method" == "copy" && ! -d "$dest" ]]; then
+      status_icon="${RED}✗${RESET}"
+    fi
+
+    printf "  ${status_icon} ${BOLD}%-16s${RESET} ${DIM}%-8s${RESET} %s\n" "$skill" "$method" "$short_dest"
+    printf "    ${DIM}← %s  (%s)${RESET}\n" "$short_src" "$ts"
+  done < "$REGISTRY_FILE"
+
+  printf "\n"
 }
 
 # ─── CLI argument parsing (non-interactive mode) ────────────────────
@@ -701,6 +747,7 @@ Options:
   --method <type>    Install method: symlink or copy (default: symlink)
   --skill <name>     Skill to install (repeatable, default: all)
   --update           Update all copied skills from their source repo
+  --status           Show all installed skills and their status
   --list             List available skills and exit
   -h, --help         Show this help
 
@@ -711,6 +758,7 @@ Examples:
   $(basename "$0") --skill todo-manager      # Non-interactive, single skill
   $(basename "$0") --update                  # Update all copied skills
   $(basename "$0") --update --target claude  # Update only Claude Code skills
+  $(basename "$0") --status                  # Show installed skills
 EOF
   exit 0
 }
@@ -751,6 +799,11 @@ parse_args() {
       --update)
         RUN_UPDATE=true
         shift
+        ;;
+      --status)
+        detect_targets
+        run_status
+        exit 0
         ;;
       --list)
         discover_skills
