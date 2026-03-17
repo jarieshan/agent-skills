@@ -21,6 +21,7 @@ INSTALL_METHOD=""  # "symlink" or "copy"
 SKILLS=()
 SELECTED=()
 NON_INTERACTIVE=false
+RUN_UPDATE=false
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 print_header() {
@@ -484,6 +485,28 @@ draw_conflict_options() {
   done
 }
 
+# ─── Source metadata ─────────────────────────────────────────────────
+# .source file records where a copied skill came from, for --update
+SOURCE_FILE=".source"
+
+write_source_meta() {
+  local dest="$1" src="$2" method="$3"
+  cat > "$dest/$SOURCE_FILE" <<METAEOF
+source=$src
+method=$method
+installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+METAEOF
+}
+
+read_source_meta() {
+  local meta_file="$1/$SOURCE_FILE"
+  if [[ -f "$meta_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$meta_file"
+    printf '%s' "$source"
+  fi
+}
+
 # ─── Install logic ──────────────────────────────────────────────────
 do_install() {
   local src="$1" dest="$2"
@@ -491,6 +514,7 @@ do_install() {
     ln -s "$src" "$dest"
   else
     cp -R "$src" "$dest"
+    write_source_meta "$dest" "$src" "copy"
   fi
 }
 
@@ -503,7 +527,6 @@ do_update() {
     local old_target
     old_target="$(readlink "$dest")"
     rm "$dest"
-    # Copy existing content from old target, then overlay with src
     cp -R "$old_target" "$dest"
   fi
 
@@ -514,6 +537,8 @@ do_update() {
     mkdir -p "$(dirname "$dest_file")"
     cp "$f" "$dest_file"
   done < <(find "$src" -type f 2>/dev/null)
+
+  write_source_meta "$dest" "$src" "copy"
 }
 
 install_skills() {
@@ -571,7 +596,94 @@ install_skills() {
   if [[ "$INSTALL_METHOD" == "symlink" ]]; then
     printf "  ${DIM}Skills are symlinked — git pull to update.${RESET}\n\n"
   else
-    printf "  ${DIM}Skills are copied — re-run installer to update.${RESET}\n\n"
+    printf "  ${DIM}Skills are copied — run with --update to sync latest changes.${RESET}\n\n"
+  fi
+}
+
+# ─── Update command ──────────────────────────────────────────────────
+# Scan all known target dirs for skills with .source metadata,
+# then update them from the recorded source path.
+run_update() {
+  print_header
+  printf "  ${BOLD}Scanning for installed skills...${RESET}\n\n"
+
+  local found=0 updated=0
+
+  # Collect all target dirs to scan
+  local scan_dirs=()
+  if [[ -n "$INSTALL_DIR" ]]; then
+    scan_dirs+=("$INSTALL_DIR")
+  else
+    for entry in "${ALL_TARGETS[@]}"; do
+      local cli_name display detect skills
+      IFS='|' read -r cli_name display detect skills <<< "$entry"
+      [[ -d "$skills" ]] && scan_dirs+=("$skills")
+    done
+  fi
+
+  if [[ ${#scan_dirs[@]} -eq 0 ]]; then
+    print_warn "No skill directories found."
+    exit 0
+  fi
+
+  for dir in "${scan_dirs[@]}"; do
+    # Find skill dirs with .source file
+    for skill_dir in "$dir"/*/; do
+      [[ -d "$skill_dir" ]] || continue
+      local meta_file="$skill_dir$SOURCE_FILE"
+      [[ -f "$meta_file" ]] || continue
+
+      local source="" method="" installed=""
+      # shellcheck disable=SC1090
+      source "$meta_file"
+      local src_path="$source"
+
+      local skill_name
+      skill_name="$(basename "$skill_dir")"
+      local short_dir="${dir/#$HOME/~}"
+
+      (( found++ ))
+
+      if [[ ! -d "$src_path" ]]; then
+        print_warn "$skill_name (${short_dir}) — source missing: $src_path"
+        continue
+      fi
+
+      # Check if there are changes
+      local has_diff=false
+      while IFS= read -r f; do
+        local rel="${f#$src_path/}"
+        if [[ ! -e "${skill_dir}${rel}" ]] || ! diff -q "$f" "${skill_dir}${rel}" &>/dev/null; then
+          has_diff=true
+          break
+        fi
+      done < <(find "$src_path" -type f 2>/dev/null)
+
+      if ! $has_diff; then
+        print_info "$skill_name (${short_dir}) — already up to date"
+        continue
+      fi
+
+      # Apply update
+      while IFS= read -r f; do
+        local rel="${f#$src_path/}"
+        local dest_file="${skill_dir}${rel}"
+        mkdir -p "$(dirname "$dest_file")"
+        cp "$f" "$dest_file"
+      done < <(find "$src_path" -type f 2>/dev/null)
+
+      write_source_meta "${skill_dir%/}" "$src_path" "copy"
+      print_success "$skill_name (${short_dir}) — updated"
+      (( updated++ ))
+    done
+  done
+
+  if [[ $found -eq 0 ]]; then
+    print_warn "No copied skills with source tracking found."
+    printf "  ${DIM}Only skills installed with --method copy have update tracking.${RESET}\n"
+    printf "  ${DIM}Symlinked skills update automatically via git pull.${RESET}\n\n"
+  else
+    printf "\n  ${BOLD}${GREEN}Done!${RESET} ${BOLD}${updated}${RESET}/${BOLD}${found}${RESET} skill(s) updated.\n\n"
   fi
 }
 
@@ -588,6 +700,7 @@ Options:
   --path <dir>       Install to a custom path (overrides --target)
   --method <type>    Install method: symlink or copy (default: symlink)
   --skill <name>     Skill to install (repeatable, default: all)
+  --update           Update all copied skills from their source repo
   --list             List available skills and exit
   -h, --help         Show this help
 
@@ -596,6 +709,8 @@ Examples:
   $(basename "$0") --target cursor           # Install to Cursor skills dir
   $(basename "$0") --method copy             # Copy instead of symlink
   $(basename "$0") --skill todo-manager      # Non-interactive, single skill
+  $(basename "$0") --update                  # Update all copied skills
+  $(basename "$0") --update --target claude  # Update only Claude Code skills
 EOF
   exit 0
 }
@@ -632,6 +747,10 @@ parse_args() {
         explicit_skills+=("$2")
         NON_INTERACTIVE=true
         shift 2
+        ;;
+      --update)
+        RUN_UPDATE=true
+        shift
         ;;
       --list)
         discover_skills
@@ -679,6 +798,12 @@ main() {
   discover_skills
   detect_targets
   parse_args "$@"
+
+  # Handle --update mode
+  if [[ "$RUN_UPDATE" == true ]]; then
+    run_update
+    exit 0
+  fi
 
   print_header
 
