@@ -157,16 +157,131 @@ draw_skill_list() {
   done
 }
 
-# ─── Interactive path input ─────────────────────────────────────────
-interactive_input_path() {
-  printf "  ${BOLD}Install location${RESET} ${DIM}(enter for default)${RESET}\n"
-  printf "  ${CYAN}${POINTER}${RESET} ${DIM}[${DEFAULT_INSTALL_DIR}]${RESET} "
-  local input
-  read -r input
-  INSTALL_DIR="${input:-$DEFAULT_INSTALL_DIR}"
-  # Expand ~ manually
-  INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+# ─── Install targets ─────────────────────────────────────────────────
+# Known targets: "cli_name|display_name|detect_dir|skills_path"
+#   detect_dir  — if this directory exists, the tool is considered installed
+#   skills_path — where skills should be symlinked into
+ALL_TARGETS=(
+  "claude|Claude Code|$HOME/.claude|$HOME/.claude/skills"
+  "cursor|Cursor|$HOME/.cursor|$HOME/.cursor/skills-cursor"
+  "antigravity|Antigravity|$HOME/.gemini/antigravity|$HOME/.gemini/antigravity/skills"
+  "openclaw|OpenClaw|$HOME/.openclaw|$HOME/.openclaw/skills"
+  "gemini|Gemini CLI|$HOME/.gemini|$HOME/.gemini/skills"
+  "universal|Universal|$HOME/.agents|$HOME/.agents/skills"
+)
+
+# Populated at runtime with only detected targets + Custom
+TARGETS=()
+
+detect_targets() {
+  TARGETS=()
+  for entry in "${ALL_TARGETS[@]}"; do
+    local cli_name display detect skills
+    IFS='|' read -r cli_name display detect skills <<< "$entry"
+    if [[ -d "$detect" ]]; then
+      TARGETS+=("$entry")
+    fi
+  done
+  # Always append Custom option
+  TARGETS+=("custom|Custom|NONE|CUSTOM")
+}
+
+# Resolve --target name to install path
+resolve_target_name() {
+  local name="$1"
+  for entry in "${ALL_TARGETS[@]}"; do
+    local cli_name display detect skills
+    IFS='|' read -r cli_name display detect skills <<< "$entry"
+    if [[ "$cli_name" == "$name" ]]; then
+      INSTALL_DIR="$skills"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ─── Interactive single-select for install target ────────────────────
+interactive_select_target() {
+  local cursor=0
+  local num_targets=${#TARGETS[@]}
+
+  tput civis 2>/dev/null || true
+
+  printf "  ${BOLD}Install location${RESET} ${DIM}(↑↓ move, enter confirm)${RESET}\n\n"
+
+  draw_target_list "$cursor"
+
+  while true; do
+    local key
+    read -rsn1 key
+
+    case "$key" in
+      $'\x1b')
+        read -rsn2 rest
+        case "$rest" in
+          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+          '[B') (( cursor < num_targets - 1 )) && (( cursor++ )) ;;
+        esac
+        ;;
+      '')
+        break
+        ;;
+    esac
+
+    for (( i=0; i<num_targets; i++ )); do
+      tput cuu1 2>/dev/null
+    done
+
+    draw_target_list "$cursor"
+  done
+
+  tput cnorm 2>/dev/null || true
+
+  # Extract the selected path
+  local selected_entry="${TARGETS[$cursor]}"
+  local cli_name display detect skills
+  IFS='|' read -r cli_name display detect skills <<< "$selected_entry"
+
+  if [[ "$skills" == "CUSTOM" ]]; then
+    printf "\n  ${CYAN}${POINTER}${RESET} Path: "
+    local input
+    read -r input
+    INSTALL_DIR="${input/#\~/$HOME}"
+  else
+    INSTALL_DIR="$skills"
+  fi
+
   printf "\n"
+}
+
+draw_target_list() {
+  local cursor=$1
+  for (( i=0; i<${#TARGETS[@]}; i++ )); do
+    local entry="${TARGETS[$i]}"
+    local cli_name display detect skills
+    IFS='|' read -r cli_name display detect skills <<< "$entry"
+
+    # Show short path for display
+    local short_path="${skills/#$HOME/\~}"
+
+    local radio="${UNCHECKED}"
+    local prefix="   "
+    local style="" end=""
+    if [[ $i -eq $cursor ]]; then
+      radio="${CHECKED}"
+      prefix="  ${CYAN}${POINTER}${RESET}"
+      style="${BOLD}"
+      end="${RESET}"
+    fi
+
+    if [[ $i -eq $cursor ]]; then
+      printf "%b ${GREEN}%s${RESET} %b%-14s%b ${DIM}%s${RESET}\n" \
+        "$prefix" "$radio" "$style" "$display" "$end" "$short_path"
+    else
+      printf "%b ${DIM}%s${RESET} %b%-14s%b ${DIM}%s${RESET}\n" \
+        "$prefix" "$radio" "$style" "$display" "$end" "$short_path"
+    fi
+  done
 }
 
 # ─── Install logic ──────────────────────────────────────────────────
@@ -211,15 +326,18 @@ Usage: $(basename "$0") [options]
 Interactive installer for agent skills.
 
 Options:
-  --path <dir>       Install location (default: $DEFAULT_INSTALL_DIR)
+  --target <name>    Install target (default: claude)
+                     Supported: claude, cursor, antigravity, openclaw, gemini, universal
+  --path <dir>       Install to a custom path (overrides --target)
   --skill <name>     Skill to install (repeatable, default: all)
   --list             List available skills and exit
   -h, --help         Show this help
 
 Examples:
   $(basename "$0")                           # Interactive mode
-  $(basename "$0") --path ~/.claude/skills   # Interactive, custom path
+  $(basename "$0") --target cursor           # Install to Cursor skills dir
   $(basename "$0") --skill todo-manager      # Non-interactive, single skill
+  $(basename "$0") --path ~/my-skills        # Custom path
 EOF
   exit 0
 }
@@ -229,6 +347,15 @@ parse_args() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --target)
+        if ! resolve_target_name "$2"; then
+          local supported
+          supported=$(printf '%s\n' "${ALL_TARGETS[@]}" | cut -d'|' -f1 | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+          print_error "Unknown target: $2 (supported: $supported)"
+          exit 1
+        fi
+        shift 2
+        ;;
       --path)
         INSTALL_DIR="${2/#\~/$HOME}"
         shift 2
@@ -282,6 +409,7 @@ parse_args() {
 # ─── Main ────────────────────────────────────────────────────────────
 main() {
   discover_skills
+  detect_targets
   parse_args "$@"
 
   print_header
@@ -301,7 +429,7 @@ main() {
     if [[ "$NON_INTERACTIVE" == true ]]; then
       INSTALL_DIR="$DEFAULT_INSTALL_DIR"
     else
-      interactive_input_path
+      interactive_select_target
     fi
   fi
 
