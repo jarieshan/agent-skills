@@ -30,6 +30,7 @@ REPO_BRANCH="main"
 CACHE_DIR="$HOME/.config/agent-skills/repo"
 
 SCRIPT_DIR=""  # resolved after bootstrap
+SKILLS_DIR=""  # $SCRIPT_DIR/skills
 DEFAULT_INSTALL_DIR="$HOME/.claude/skills"
 INSTALL_DIR=""
 INSTALL_METHOD="copy"
@@ -63,6 +64,7 @@ bootstrap() {
   script_parent="$(cd "$(dirname "$0")" && pwd)"
   if [[ -d "$script_parent/.git" ]]; then
     SCRIPT_DIR="$script_parent"
+    SKILLS_DIR="$SCRIPT_DIR/skills"
     return
   fi
 
@@ -93,6 +95,7 @@ bootstrap() {
   printf "\n"
 
   SCRIPT_DIR="$CACHE_DIR"
+  SKILLS_DIR="$SCRIPT_DIR/skills"
 }
 
 # ─── Skill discovery ────────────────────────────────────────────────
@@ -102,17 +105,17 @@ discover_skills() {
     local dir
     dir="$(dirname "$skill_file")"
     SKILLS+=("$(basename "$dir")")
-  done < <(find "$SCRIPT_DIR" -maxdepth 2 -name "SKILL.md" -not -path "*/.git/*" | sort)
+  done < <(find "$SKILLS_DIR" -maxdepth 2 -name "SKILL.md" -not -path "*/.git/*" | sort)
 
   if [[ ${#SKILLS[@]} -eq 0 ]]; then
-    print_error "No skills found in $SCRIPT_DIR"
+    print_error "No skills found in $SKILLS_DIR"
     exit 1
   fi
 }
 
 get_description() {
   local skill="$1"
-  local skill_file="$SCRIPT_DIR/$skill/SKILL.md"
+  local skill_file="$SKILLS_DIR/$skill/SKILL.md"
   sed -n 's/^description: *"\{0,1\}\(.*\)"\{0,1\}$/\1/p' "$skill_file" | head -1 | cut -c1-60
 }
 
@@ -593,7 +596,7 @@ install_skills() {
     [[ ${SELECTED[$i]} -eq 0 ]] && continue
 
     local skill="${SKILLS[$i]}"
-    local src="$SCRIPT_DIR/$skill"
+    local src="$SKILLS_DIR/$skill"
     local dest="$INSTALL_DIR/$skill"
 
     if [[ -e "$dest" || -L "$dest" ]]; then
@@ -782,7 +785,7 @@ cmd_update() {
       [[ "$dest_parent" != "$INSTALL_DIR" ]] && continue
     fi
 
-    local src="$SCRIPT_DIR/$skill_name"
+    local src="$SKILLS_DIR/$skill_name"
     if [[ ! -d "$src" ]]; then
       warn_msgs+=("$skill_name ($short_dest) — not found in repo, skipped")
       continue
