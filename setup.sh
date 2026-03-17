@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ─── Agent Skills Setup ─────────────────────────────────────────────
 # One-line install:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/main/setup.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/Release/setup.sh)
 #
 # Subcommands:
 #   setup.sh [install]         Interactive install (default)
@@ -26,7 +26,7 @@ UNCHECKED='○'
 
 # ─── Globals ─────────────────────────────────────────────────────────
 REPO_URL="https://github.com/jarieshan/agent-skills.git"
-REPO_BRANCH="main"
+REPO_BRANCH="Release"
 CACHE_DIR="$HOME/.config/agent-skills/repo"
 
 SCRIPT_DIR=""  # resolved after bootstrap
@@ -430,15 +430,12 @@ handle_conflict() {
     printf "  ${BOLD}${RED}This will backup and remove the existing directory, then reinstall.${RESET}\n"
     printf "  ${BOLD}Confirm? [y/N]${RESET} "
     local confirm
-    read -rn1 confirm
-    printf "\n"
+    read -r confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
       printf "\n"
       CONFLICT_ACTION=0
       return
     fi
-    printf "  ${DIM}Press Enter to proceed...${RESET}"
-    read -r
     printf "\n"
     backup_skill "$skill" "$dest"
   fi
@@ -997,7 +994,7 @@ Examples:
   $(basename "$0") status                       # Show installed skills
 
 One-line install (no git clone needed):
-  bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/main/setup.sh)
+  bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/Release/setup.sh)
   bash <(curl -fsSL .../setup.sh) update
   bash <(curl -fsSL .../setup.sh) install --skill todo-manager
 

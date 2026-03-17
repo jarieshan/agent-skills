@@ -15,7 +15,7 @@
 无需手动 clone，直接运行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/main/setup.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/Release/setup.sh)
 ```
 
 脚本会自动 clone 仓库到 `~/.config/agent-skills/repo/`，然后启动交互式安装。
