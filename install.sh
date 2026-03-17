@@ -262,7 +262,7 @@ draw_target_list() {
     IFS='|' read -r cli_name display detect skills <<< "$entry"
 
     # Show short path for display
-    local short_path="${skills/#$HOME/\~}"
+    local short_path="${skills/#$HOME/~}"
 
     local radio="${UNCHECKED}"
     local prefix="   "
