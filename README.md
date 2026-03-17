@@ -7,7 +7,7 @@
 | Skill | 调用方式 | 说明 |
 |-------|---------|------|
 | [todo-manager](skills/todo-manager/) | `/todo [指令]` | 基于 Markdown 的轻量 todo 管理，支持想法收集、项目管理、任务汇总 |
-| [family-health-mamager](skills/family-health-mamager/) | `/family-health [指令]` | 管理家庭成员健康档案，归档医疗资料、整理体检报告、追踪指标趋势 |
+| [family-health-manager](skills/family-health-manager/) | `/family-health [指令]` | 管理家庭成员健康档案，归档医疗资料、整理体检报告、追踪指标趋势 |
 
 ## 安装
 
