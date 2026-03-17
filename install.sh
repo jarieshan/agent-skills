@@ -414,14 +414,21 @@ handle_conflict() {
 
   printf "\n"
 
-  # Interactive: ask skip or reinstall
+  # Interactive: ask skip, update, or reinstall
+  # Return: 0=skip, 1=update, 2=reinstall
   if [[ "$NON_INTERACTIVE" == true ]]; then
-    print_warn "$skill — skipped (use interactive mode to reinstall)"
-    return 1
+    print_warn "$skill — skipped (use interactive mode to reinstall/update)"
+    return 0
   fi
 
   local cursor=0
-  local options=("Skip" "Reinstall")
+  local num_opts=3
+  local -a opt_names=("Skip" "Update" "Reinstall")
+  local -a opt_descs=(
+    "keep existing, do nothing"
+    "replace changed + add new, keep extra files"
+    "remove existing and install fresh"
+  )
 
   tput civis 2>/dev/null || true
   printf "  ${BOLD}Action?${RESET} ${DIM}(↑↓ move, enter confirm)${RESET}\n\n"
@@ -436,31 +443,30 @@ handle_conflict() {
         read -rsn2 rest
         case "$rest" in
           '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < 1 )) && (( cursor++ )) ;;
+          '[B') (( cursor < num_opts - 1 )) && (( cursor++ )) ;;
         esac
         ;;
       '') break ;;
     esac
-    for (( j=0; j<2; j++ )); do tput cuu1 2>/dev/null; done
+    for (( j=0; j<num_opts; j++ )); do tput cuu1 2>/dev/null; done
     draw_conflict_options "$cursor"
   done
 
   tput cnorm 2>/dev/null || true
   printf "\n"
 
-  if [[ $cursor -eq 0 ]]; then
-    return 1  # skip
-  fi
-
-  # Reinstall: remove old, return 0 to proceed
-  rm -rf "$dest"
-  return 0
+  return "$cursor"  # 0=skip, 1=update, 2=reinstall
 }
 
 draw_conflict_options() {
   local cursor=$1
-  local options=("Skip" "Reinstall")
-  for (( j=0; j<2; j++ )); do
+  local -a opt_names=("Skip" "Update" "Reinstall")
+  local -a opt_descs=(
+    "keep existing, do nothing"
+    "replace changed + add new, keep extra files"
+    "remove existing and install fresh"
+  )
+  for (( j=0; j<${#opt_names[@]}; j++ )); do
     local radio="${UNCHECKED}" prefix="   " style="" end=""
     if [[ $j -eq $cursor ]]; then
       radio="${CHECKED}"
@@ -468,17 +474,12 @@ draw_conflict_options() {
       style="${BOLD}"
       end="${RESET}"
     fi
-    if [[ $j -eq 0 ]]; then
-      local desc="keep existing, do nothing"
-    else
-      local desc="remove existing and install fresh"
-    fi
     if [[ $j -eq $cursor ]]; then
-      printf "%b ${GREEN}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
-        "$prefix" "$radio" "$style" "${options[$j]}" "$end" "$desc"
+      printf "%b ${GREEN}%s${RESET} %b%-12s%b ${DIM}— %s${RESET}\n" \
+        "$prefix" "$radio" "$style" "${opt_names[$j]}" "$end" "${opt_descs[$j]}"
     else
-      printf "%b ${DIM}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
-        "$prefix" "$radio" "$style" "${options[$j]}" "$end" "$desc"
+      printf "%b ${DIM}%s${RESET} %b%-12s%b ${DIM}— %s${RESET}\n" \
+        "$prefix" "$radio" "$style" "${opt_names[$j]}" "$end" "${opt_descs[$j]}"
     fi
   done
 }
@@ -491,6 +492,28 @@ do_install() {
   else
     cp -R "$src" "$dest"
   fi
+}
+
+# Update: copy changed + new files from src into dest, keep extra files in dest
+do_update() {
+  local src="$1" dest="$2"
+
+  # For symlink dest, remove the link first and copy fresh
+  if [[ -L "$dest" ]]; then
+    local old_target
+    old_target="$(readlink "$dest")"
+    rm "$dest"
+    # Copy existing content from old target, then overlay with src
+    cp -R "$old_target" "$dest"
+  fi
+
+  # Overlay: copy all files from src into dest
+  while IFS= read -r f; do
+    local rel="${f#$src/}"
+    local dest_file="$dest/$rel"
+    mkdir -p "$(dirname "$dest_file")"
+    cp "$f" "$dest_file"
+  done < <(find "$src" -type f 2>/dev/null)
 }
 
 install_skills() {
@@ -515,14 +538,27 @@ install_skills() {
         fi
       fi
 
-      # Conflict: ask user
-      if handle_conflict "$skill" "$src" "$dest"; then
-        do_install "$src" "$dest"
-        print_success "$skill — reinstalled"
-        (( count++ ))
-      else
-        print_info "$skill — skipped"
-      fi
+      # Conflict: ask user (returns 0=skip, 1=update, 2=reinstall)
+      local action
+      handle_conflict "$skill" "$src" "$dest"
+      action=$?
+
+      case $action in
+        0) # Skip
+          print_info "$skill — skipped"
+          ;;
+        1) # Update
+          do_update "$src" "$dest"
+          print_success "$skill — updated"
+          (( count++ ))
+          ;;
+        2) # Reinstall
+          rm -rf "$dest"
+          do_install "$src" "$dest"
+          print_success "$skill — reinstalled"
+          (( count++ ))
+          ;;
+      esac
       continue
     fi
 
@@ -530,9 +566,6 @@ install_skills() {
     print_success "$skill — installed"
     (( count++ ))
   done
-
-  local method_label="symlinked"
-  [[ "$INSTALL_METHOD" == "copy" ]] && method_label="copied"
 
   printf "\n  ${BOLD}${GREEN}Done!${RESET} Installed ${BOLD}${count}${RESET} skill(s) to ${DIM}${INSTALL_DIR}${RESET}\n"
   if [[ "$INSTALL_METHOD" == "symlink" ]]; then
