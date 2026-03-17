@@ -334,17 +334,24 @@ handle_conflict() {
   tput cnorm 2>/dev/null || true
   printf "\n"
 
-  # Step 2: if reinstall, show diff and confirm Y/N
+  # Step 2: if reinstall, show diff and confirm
   if [[ $cursor -eq 2 ]]; then
     show_file_diff "$src" "$dest"
-    printf "  ${BOLD}${RED}This will delete the existing directory and reinstall.${RESET}\n"
+    printf "  ${BOLD}${RED}This will backup and remove the existing directory, then reinstall.${RESET}\n"
     printf "  ${BOLD}Confirm? [y/N]${RESET} "
     local confirm
     read -rn1 confirm
-    printf "\n\n"
+    printf "\n"
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+      printf "\n"
       return 0  # skip
     fi
+    printf "  ${DIM}Press Enter to proceed...${RESET}"
+    read -r
+    printf "\n"
+
+    # Backup existing dest before removal
+    backup_skill "$skill" "$dest"
   fi
 
   return "$cursor"  # 0=skip, 1=update, 2=reinstall
@@ -424,31 +431,93 @@ draw_conflict_options() {
 
 # ─── Registry ────────────────────────────────────────────────────────
 # ~/.config/agent-skills/registry.list
-# Each line is an install directory path, e.g. /Users/x/.claude/skills
+# Each line is a full skill directory path, e.g. /Users/x/.claude/skills/todo-manager
 REGISTRY_DIR="$HOME/.config/agent-skills"
 REGISTRY_FILE="$REGISTRY_DIR/registry.list"
+BACKUP_DIR="$REGISTRY_DIR/backup"
 
 ensure_registry() {
   mkdir -p "$REGISTRY_DIR"
   [[ -f "$REGISTRY_FILE" ]] || touch "$REGISTRY_FILE"
 }
 
-# Add an install dir to registry (deduplicated)
+# Add a skill path to registry (deduplicated)
 registry_add() {
-  local dir="$1"
+  local path="$1"
   ensure_registry
-  if ! grep -qxF "$dir" "$REGISTRY_FILE" 2>/dev/null; then
-    printf '%s\n' "$dir" >> "$REGISTRY_FILE"
+  if ! grep -qxF "$path" "$REGISTRY_FILE" 2>/dev/null; then
+    printf '%s\n' "$path" >> "$REGISTRY_FILE"
   fi
 }
 
-# Remove an install dir from registry
+# Remove a skill path from registry
 registry_remove() {
-  local dir="$1"
+  local path="$1"
   ensure_registry
   local tmp="$REGISTRY_FILE.tmp"
-  grep -vxF "$dir" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
+  grep -vxF "$path" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
   mv "$tmp" "$REGISTRY_FILE"
+}
+
+# ─── Backup ──────────────────────────────────────────────────────────
+backup_skill() {
+  local skill="$1" dest="$2"
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local backup_path="$BACKUP_DIR/${skill}_${ts}"
+  mkdir -p "$BACKUP_DIR"
+
+  if [[ -L "$dest" ]]; then
+    # For symlink, copy the actual content
+    local target
+    target="$(readlink "$dest")"
+    cp -R "$target" "$backup_path"
+  else
+    cp -R "$dest" "$backup_path"
+  fi
+
+  print_info "Backed up to ${backup_path/#$HOME/~}"
+}
+
+run_clean_backup() {
+  print_header
+
+  if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
+    print_info "No backups found."
+    printf "\n"
+    return
+  fi
+
+  printf "  ${BOLD}Backups${RESET} ${DIM}(${BACKUP_DIR/#$HOME/~})${RESET}\n\n"
+
+  local total_size
+  total_size="$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)"
+
+  for entry in "$BACKUP_DIR"/*/; do
+    [[ -d "$entry" ]] || continue
+    local name
+    name="$(basename "$entry")"
+    local size
+    size="$(du -sh "$entry" 2>/dev/null | cut -f1)"
+    printf "    %s ${DIM}(%s)${RESET}\n" "$name" "$size"
+  done
+
+  printf "\n  ${DIM}Total: %s${RESET}\n\n" "$total_size"
+
+  printf "  ${BOLD}Delete all backups? [y/N]${RESET} "
+  local confirm
+  read -rn1 confirm
+  printf "\n"
+
+  if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+    rm -rf "$BACKUP_DIR"
+    printf "\n"
+    print_success "All backups deleted."
+  else
+    printf "\n"
+    print_info "Backups kept."
+  fi
+  printf "\n"
 }
 
 # ─── Install logic ──────────────────────────────────────────────────
@@ -515,12 +584,14 @@ install_skills() {
           ;;
         1) # Update
           do_update "$src" "$dest"
+          registry_add "$dest"
           print_success "$skill — updated"
           (( count++ ))
           ;;
         2) # Reinstall
           rm -rf "$dest"
           do_install "$skill" "$src" "$dest"
+          registry_add "$dest"
           print_success "$skill — reinstalled"
           (( count++ ))
           ;;
@@ -529,12 +600,10 @@ install_skills() {
     fi
 
     do_install "$skill" "$src" "$dest"
+    registry_add "$dest"
     print_success "$skill — installed"
     (( count++ ))
   done
-
-  # Record install dir in registry
-  registry_add "$INSTALL_DIR"
 
   printf "\n  ${BOLD}${GREEN}Done!${RESET} Installed ${BOLD}${count}${RESET} skill(s) to ${DIM}${INSTALL_DIR}${RESET}\n"
   if [[ "$INSTALL_METHOD" == "symlink" ]]; then
@@ -545,7 +614,7 @@ install_skills() {
 }
 
 # ─── Update command ──────────────────────────────────────────────────
-# Scan registry dirs, match skills against repo, sync changes.
+# Read registry (full skill paths), match against repo by name, sync.
 run_update() {
   discover_skills
   ensure_registry
@@ -560,61 +629,68 @@ run_update() {
 
   local found=0 updated=0
 
-  while IFS= read -r install_dir; do
-    [[ -z "$install_dir" || ! -d "$install_dir" ]] && continue
+  while IFS= read -r dest; do
+    [[ -z "$dest" ]] && continue
+
+    local skill_name
+    skill_name="$(basename "$dest")"
+    local short_dest="${dest/#$HOME/~}"
 
     # Filter by --target / --path if specified
-    if [[ -n "$INSTALL_DIR" && "$install_dir" != "$INSTALL_DIR" ]]; then
+    if [[ -n "$INSTALL_DIR" ]]; then
+      local dest_parent
+      dest_parent="$(dirname "$dest")"
+      [[ "$dest_parent" != "$INSTALL_DIR" ]] && continue
+    fi
+
+    # Match against repo skills
+    local src="$SCRIPT_DIR/$skill_name"
+    if [[ ! -d "$src" ]]; then
+      print_warn "$skill_name ($short_dest) — not found in repo, skipped"
       continue
     fi
 
-    local short_dir="${install_dir/#$HOME/~}"
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+      print_warn "$skill_name ($short_dest) — missing"
+      continue
+    fi
 
-    for skill in "${SKILLS[@]}"; do
-      local src="$SCRIPT_DIR/$skill"
-      local dest="$install_dir/$skill"
+    (( found++ ))
 
-      # Skip if not installed in this dir
-      [[ -e "$dest" || -L "$dest" ]] || continue
-
-      (( found++ ))
-
-      # Symlinked: nothing to update
-      if [[ -L "$dest" ]]; then
-        local target
-        target="$(readlink "$dest")"
-        if [[ -d "$target" ]]; then
-          print_info "$skill ($short_dir) — symlinked, git pull to update"
-        else
-          print_warn "$skill ($short_dir) — symlink broken"
-        fi
-        continue
+    # Symlinked: nothing to update
+    if [[ -L "$dest" ]]; then
+      local target
+      target="$(readlink "$dest")"
+      if [[ -d "$target" ]]; then
+        print_info "$skill_name ($short_dest) — symlinked, git pull to update"
+      else
+        print_warn "$skill_name ($short_dest) — symlink broken"
       fi
+      continue
+    fi
 
-      # Copy: check for diff and sync
-      local has_diff=false
-      while IFS= read -r f; do
-        local rel="${f#$src/}"
-        if [[ ! -e "$dest/$rel" ]] || ! diff -q "$f" "$dest/$rel" &>/dev/null; then
-          has_diff=true
-          break
-        fi
-      done < <(find "$src" -type f 2>/dev/null)
-
-      if ! $has_diff; then
-        print_info "$skill ($short_dir) — up to date"
-        continue
+    # Copy: check for diff and sync
+    local has_diff=false
+    while IFS= read -r f; do
+      local rel="${f#$src/}"
+      if [[ ! -e "$dest/$rel" ]] || ! diff -q "$f" "$dest/$rel" &>/dev/null; then
+        has_diff=true
+        break
       fi
+    done < <(find "$src" -type f 2>/dev/null)
 
-      # Apply update
-      do_update "$src" "$dest"
-      print_success "$skill ($short_dir) — updated"
-      (( updated++ ))
-    done
+    if ! $has_diff; then
+      print_info "$skill_name ($short_dest) — up to date"
+      continue
+    fi
+
+    do_update "$src" "$dest"
+    print_success "$skill_name ($short_dest) — updated"
+    (( updated++ ))
   done < "$REGISTRY_FILE"
 
   if [[ $found -eq 0 ]]; then
-    print_warn "No installed skills found in registered directories."
+    print_warn "No matching skills found in registry."
   else
     printf "\n  ${BOLD}${GREEN}Done!${RESET} ${BOLD}${updated}${RESET}/${BOLD}${found}${RESET} skill(s) updated.\n"
   fi
@@ -623,47 +699,39 @@ run_update() {
 
 # ─── Status command ──────────────────────────────────────────────────
 run_status() {
-  discover_skills
   ensure_registry
   print_header
 
   if [[ ! -s "$REGISTRY_FILE" ]]; then
-    print_warn "No install directories registered."
+    print_warn "No skills registered."
     printf "\n"
     return
   fi
 
-  printf "  ${BOLD}Registered directories${RESET} ${DIM}(${REGISTRY_FILE/#$HOME/~})${RESET}\n\n"
+  printf "  ${BOLD}Installed skills${RESET} ${DIM}(${REGISTRY_FILE/#$HOME/~})${RESET}\n\n"
 
-  while IFS= read -r install_dir; do
-    [[ -z "$install_dir" ]] && continue
-    local short_dir="${install_dir/#$HOME/~}"
+  while IFS= read -r dest; do
+    [[ -z "$dest" ]] && continue
+    local skill_name
+    skill_name="$(basename "$dest")"
+    local short_dest="${dest/#$HOME/~}"
 
-    if [[ ! -d "$install_dir" ]]; then
-      printf "  ${RED}✗${RESET} ${DIM}%s${RESET} — directory missing\n" "$short_dir"
-      continue
-    fi
-
-    printf "  ${BOLD}%s${RESET}\n" "$short_dir"
-
-    for skill in "${SKILLS[@]}"; do
-      local dest="$install_dir/$skill"
-      [[ -e "$dest" || -L "$dest" ]] || continue
-
-      if [[ -L "$dest" ]]; then
-        local target
-        target="$(readlink "$dest")"
-        if [[ -d "$target" ]]; then
-          printf "    ${GREEN}✓${RESET} %-16s ${DIM}symlink → %s${RESET}\n" "$skill" "${target/#$HOME/~}"
-        else
-          printf "    ${RED}✗${RESET} %-16s ${DIM}symlink broken${RESET}\n" "$skill"
-        fi
-      elif [[ -d "$dest" ]]; then
-        printf "    ${GREEN}✓${RESET} %-16s ${DIM}copy${RESET}\n" "$skill"
+    if [[ -L "$dest" ]]; then
+      local target
+      target="$(readlink "$dest")"
+      if [[ -d "$target" ]]; then
+        printf "  ${GREEN}✓${RESET} %-16s ${DIM}symlink  %s${RESET}\n" "$skill_name" "$short_dest"
+      else
+        printf "  ${RED}✗${RESET} %-16s ${DIM}broken   %s${RESET}\n" "$skill_name" "$short_dest"
       fi
-    done
-    printf "\n"
+    elif [[ -d "$dest" ]]; then
+      printf "  ${GREEN}✓${RESET} %-16s ${DIM}copy     %s${RESET}\n" "$skill_name" "$short_dest"
+    else
+      printf "  ${RED}✗${RESET} %-16s ${DIM}missing  %s${RESET}\n" "$skill_name" "$short_dest"
+    fi
   done < "$REGISTRY_FILE"
+
+  printf "\n"
 }
 
 # ─── CLI argument parsing (non-interactive mode) ────────────────────
@@ -681,6 +749,7 @@ Options:
   --skill <name>     Skill to install (repeatable, default: all)
   --update           Update all copied skills from their source repo
   --status           Show all installed skills and their status
+  --clean-backup     List and optionally delete backed-up skills
   --list             List available skills and exit
   -h, --help         Show this help
 
@@ -734,8 +803,11 @@ parse_args() {
         shift
         ;;
       --status)
-        detect_targets
         run_status
+        exit 0
+        ;;
+      --clean-backup)
+        run_clean_backup
         exit 0
         ;;
       --list)
