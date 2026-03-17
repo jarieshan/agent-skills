@@ -17,7 +17,7 @@ UNCHECKED='○'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_INSTALL_DIR="$HOME/.claude/skills"
 INSTALL_DIR=""
-INSTALL_METHOD=""  # "symlink" or "copy"
+INSTALL_METHOD="copy"  # default: copy; override with --method symlink
 SKILLS=()
 SELECTED=()
 NON_INTERACTIVE=false
@@ -286,68 +286,6 @@ draw_target_list() {
   done
 }
 
-# ─── Install method selector ─────────────────────────────────────────
-METHODS=("Symlink" "Copy")
-METHOD_DESCS=("link to repo, git pull to update" "copy files, independent of repo")
-
-interactive_select_method() {
-  local cursor=0
-  local num=${#METHODS[@]}
-
-  tput civis 2>/dev/null || true
-
-  printf "  ${BOLD}Install method${RESET} ${DIM}(↑↓ move, enter confirm)${RESET}\n\n"
-
-  draw_method_list "$cursor"
-
-  while true; do
-    local key
-    read -rsn1 key
-    case "$key" in
-      $'\x1b')
-        read -rsn2 rest
-        case "$rest" in
-          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < num - 1 )) && (( cursor++ )) ;;
-        esac
-        ;;
-      '') break ;;
-    esac
-
-    for (( i=0; i<num; i++ )); do tput cuu1 2>/dev/null; done
-    draw_method_list "$cursor"
-  done
-
-  tput cnorm 2>/dev/null || true
-
-  if [[ $cursor -eq 0 ]]; then
-    INSTALL_METHOD="symlink"
-  else
-    INSTALL_METHOD="copy"
-  fi
-  printf "\n"
-}
-
-draw_method_list() {
-  local cursor=$1
-  for (( i=0; i<${#METHODS[@]}; i++ )); do
-    local radio="${UNCHECKED}" prefix="   " style="" end=""
-    if [[ $i -eq $cursor ]]; then
-      radio="${CHECKED}"
-      prefix="  ${CYAN}${POINTER}${RESET}"
-      style="${BOLD}"
-      end="${RESET}"
-    fi
-    if [[ $i -eq $cursor ]]; then
-      printf "%b ${GREEN}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
-        "$prefix" "$radio" "$style" "${METHODS[$i]}" "$end" "${METHOD_DESCS[$i]}"
-    else
-      printf "%b ${DIM}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
-        "$prefix" "$radio" "$style" "${METHODS[$i]}" "$end" "${METHOD_DESCS[$i]}"
-    fi
-  done
-}
-
 # ─── Conflict resolution ────────────────────────────────────────────
 # Compare src and dest, show diff summary, ask user to confirm reinstall
 handle_conflict() {
@@ -486,36 +424,31 @@ draw_conflict_options() {
 }
 
 # ─── Registry ────────────────────────────────────────────────────────
-# Central config at ~/.config/agent-skills/registry.tsv
-# Format: skill<TAB>source<TAB>dest<TAB>method<TAB>timestamp
+# ~/.config/agent-skills/registry.list
+# Each line is an install directory path, e.g. /Users/x/.claude/skills
 REGISTRY_DIR="$HOME/.config/agent-skills"
-REGISTRY_FILE="$REGISTRY_DIR/registry.tsv"
+REGISTRY_FILE="$REGISTRY_DIR/registry.list"
 
 ensure_registry() {
   mkdir -p "$REGISTRY_DIR"
   [[ -f "$REGISTRY_FILE" ]] || touch "$REGISTRY_FILE"
 }
 
-# Add or update a record (upsert by dest path)
-registry_upsert() {
-  local skill="$1" src="$2" dest="$3" method="$4"
-  local ts
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Add an install dir to registry (deduplicated)
+registry_add() {
+  local dir="$1"
   ensure_registry
-
-  # Remove existing entry with same dest, then append
-  local tmp="$REGISTRY_FILE.tmp"
-  grep -v "	${dest}	" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
-  printf '%s\t%s\t%s\t%s\t%s\n' "$skill" "$src" "$dest" "$method" "$ts" >> "$tmp"
-  mv "$tmp" "$REGISTRY_FILE"
+  if ! grep -qxF "$dir" "$REGISTRY_FILE" 2>/dev/null; then
+    printf '%s\n' "$dir" >> "$REGISTRY_FILE"
+  fi
 }
 
-# Remove a record by dest path
+# Remove an install dir from registry
 registry_remove() {
-  local dest="$1"
+  local dir="$1"
   ensure_registry
   local tmp="$REGISTRY_FILE.tmp"
-  grep -v "	${dest}	" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
+  grep -vxF "$dir" "$REGISTRY_FILE" > "$tmp" 2>/dev/null || true
   mv "$tmp" "$REGISTRY_FILE"
 }
 
@@ -527,12 +460,11 @@ do_install() {
   else
     cp -R "$src" "$dest"
   fi
-  registry_upsert "$skill" "$src" "$dest" "$INSTALL_METHOD"
 }
 
 # Update: copy changed + new files from src into dest, keep extra files in dest
 do_update() {
-  local skill="$1" src="$2" dest="$3"
+  local src="$1" dest="$2"
 
   # For symlink dest, remove the link first and copy fresh
   if [[ -L "$dest" ]]; then
@@ -549,8 +481,6 @@ do_update() {
     mkdir -p "$(dirname "$dest_file")"
     cp "$f" "$dest_file"
   done < <(find "$src" -type f 2>/dev/null)
-
-  registry_upsert "$skill" "$src" "$dest" "copy"
 }
 
 install_skills() {
@@ -585,7 +515,7 @@ install_skills() {
           print_info "$skill — skipped"
           ;;
         1) # Update
-          do_update "$skill" "$src" "$dest"
+          do_update "$src" "$dest"
           print_success "$skill — updated"
           (( count++ ))
           ;;
@@ -604,6 +534,9 @@ install_skills() {
     (( count++ ))
   done
 
+  # Record install dir in registry
+  registry_add "$INSTALL_DIR"
+
   printf "\n  ${BOLD}${GREEN}Done!${RESET} Installed ${BOLD}${count}${RESET} skill(s) to ${DIM}${INSTALL_DIR}${RESET}\n"
   if [[ "$INSTALL_METHOD" == "symlink" ]]; then
     printf "  ${DIM}Skills are symlinked — git pull to update.${RESET}\n\n"
@@ -613,88 +546,76 @@ install_skills() {
 }
 
 # ─── Update command ──────────────────────────────────────────────────
-# Read registry, find copy-installed skills, sync from source.
+# Scan registry dirs, match skills against repo, sync changes.
 run_update() {
+  discover_skills
   ensure_registry
   print_header
-  printf "  ${BOLD}Scanning registry...${RESET}\n\n"
+  printf "  ${BOLD}Updating skills...${RESET}\n\n"
 
-  local found=0 updated=0
-
-  # Parse registry entries with awk
-  # Output: skill|source|dest|method  (one per line)
   if [[ ! -s "$REGISTRY_FILE" ]]; then
     print_warn "Registry is empty. Install skills first."
     printf "\n"
     return
   fi
 
-  while IFS=$'\t' read -r skill src dest method ts; do
-    [[ -z "$skill" ]] && continue
+  local found=0 updated=0
+
+  while IFS= read -r install_dir; do
+    [[ -z "$install_dir" || ! -d "$install_dir" ]] && continue
 
     # Filter by --target / --path if specified
-    if [[ -n "$INSTALL_DIR" ]]; then
-      local dest_parent
-      dest_parent="$(dirname "$dest")"
-      [[ "$dest_parent" != "$INSTALL_DIR" ]] && continue
+    if [[ -n "$INSTALL_DIR" && "$install_dir" != "$INSTALL_DIR" ]]; then
+      continue
     fi
 
-    local short_dest="${dest/#$HOME/~}"
+    local short_dir="${install_dir/#$HOME/~}"
 
-    # Symlinked skills: just verify link is valid
-    if [[ "$method" == "symlink" ]]; then
-      if [[ -L "$dest" ]]; then
-        print_info "$skill ($short_dest) — symlinked, git pull to update"
-      else
-        print_warn "$skill ($short_dest) — symlink broken or removed"
-      fi
+    for skill in "${SKILLS[@]}"; do
+      local src="$SCRIPT_DIR/$skill"
+      local dest="$install_dir/$skill"
+
+      # Skip if not installed in this dir
+      [[ -e "$dest" || -L "$dest" ]] || continue
+
       (( found++ ))
-      continue
-    fi
 
-    # Copy-installed skills: check for changes and sync
-    (( found++ ))
-
-    if [[ ! -d "$src" ]]; then
-      print_warn "$skill ($short_dest) — source missing: $src"
-      continue
-    fi
-
-    if [[ ! -d "$dest" ]]; then
-      print_warn "$skill ($short_dest) — dest missing, re-run install"
-      continue
-    fi
-
-    # Check if there are changes
-    local has_diff=false
-    while IFS= read -r f; do
-      local rel="${f#$src/}"
-      if [[ ! -e "$dest/$rel" ]] || ! diff -q "$f" "$dest/$rel" &>/dev/null; then
-        has_diff=true
-        break
+      # Symlinked: nothing to update
+      if [[ -L "$dest" ]]; then
+        local target
+        target="$(readlink "$dest")"
+        if [[ -d "$target" ]]; then
+          print_info "$skill ($short_dir) — symlinked, git pull to update"
+        else
+          print_warn "$skill ($short_dir) — symlink broken"
+        fi
+        continue
       fi
-    done < <(find "$src" -type f 2>/dev/null)
 
-    if ! $has_diff; then
-      print_info "$skill ($short_dest) — already up to date"
-      continue
-    fi
+      # Copy: check for diff and sync
+      local has_diff=false
+      while IFS= read -r f; do
+        local rel="${f#$src/}"
+        if [[ ! -e "$dest/$rel" ]] || ! diff -q "$f" "$dest/$rel" &>/dev/null; then
+          has_diff=true
+          break
+        fi
+      done < <(find "$src" -type f 2>/dev/null)
 
-    # Apply update
-    while IFS= read -r f; do
-      local rel="${f#$src/}"
-      local dest_file="$dest/$rel"
-      mkdir -p "$(dirname "$dest_file")"
-      cp "$f" "$dest_file"
-    done < <(find "$src" -type f 2>/dev/null)
+      if ! $has_diff; then
+        print_info "$skill ($short_dir) — up to date"
+        continue
+      fi
 
-    registry_upsert "$skill" "$src" "$dest" "copy"
-    print_success "$skill ($short_dest) — updated"
-    (( updated++ ))
+      # Apply update
+      do_update "$src" "$dest"
+      print_success "$skill ($short_dir) — updated"
+      (( updated++ ))
+    done
   done < "$REGISTRY_FILE"
 
   if [[ $found -eq 0 ]]; then
-    print_warn "No matching skills found in registry."
+    print_warn "No installed skills found in registered directories."
   else
     printf "\n  ${BOLD}${GREEN}Done!${RESET} ${BOLD}${updated}${RESET}/${BOLD}${found}${RESET} skill(s) updated.\n"
   fi
@@ -703,34 +624,47 @@ run_update() {
 
 # ─── Status command ──────────────────────────────────────────────────
 run_status() {
+  discover_skills
   ensure_registry
   print_header
 
   if [[ ! -s "$REGISTRY_FILE" ]]; then
-    print_warn "No skills installed."
+    print_warn "No install directories registered."
     printf "\n"
     return
   fi
 
-  printf "  ${BOLD}Installed skills${RESET} ${DIM}(${REGISTRY_FILE/#$HOME/~})${RESET}\n\n"
+  printf "  ${BOLD}Registered directories${RESET} ${DIM}(${REGISTRY_FILE/#$HOME/~})${RESET}\n\n"
 
-  while IFS=$'\t' read -r skill src dest method ts; do
-    [[ -z "$skill" ]] && continue
-    local short_dest="${dest/#$HOME/~}"
-    local short_src="${src/#$HOME/~}"
-    local status_icon="${GREEN}✓${RESET}"
+  while IFS= read -r install_dir; do
+    [[ -z "$install_dir" ]] && continue
+    local short_dir="${install_dir/#$HOME/~}"
 
-    if [[ "$method" == "symlink" && ! -L "$dest" ]]; then
-      status_icon="${RED}✗${RESET}"
-    elif [[ "$method" == "copy" && ! -d "$dest" ]]; then
-      status_icon="${RED}✗${RESET}"
+    if [[ ! -d "$install_dir" ]]; then
+      printf "  ${RED}✗${RESET} ${DIM}%s${RESET} — directory missing\n" "$short_dir"
+      continue
     fi
 
-    printf "  ${status_icon} ${BOLD}%-16s${RESET} ${DIM}%-8s${RESET} %s\n" "$skill" "$method" "$short_dest"
-    printf "    ${DIM}← %s  (%s)${RESET}\n" "$short_src" "$ts"
-  done < "$REGISTRY_FILE"
+    printf "  ${BOLD}%s${RESET}\n" "$short_dir"
 
-  printf "\n"
+    for skill in "${SKILLS[@]}"; do
+      local dest="$install_dir/$skill"
+      [[ -e "$dest" || -L "$dest" ]] || continue
+
+      if [[ -L "$dest" ]]; then
+        local target
+        target="$(readlink "$dest")"
+        if [[ -d "$target" ]]; then
+          printf "    ${GREEN}✓${RESET} %-16s ${DIM}symlink → %s${RESET}\n" "$skill" "${target/#$HOME/~}"
+        else
+          printf "    ${RED}✗${RESET} %-16s ${DIM}symlink broken${RESET}\n" "$skill"
+        fi
+      elif [[ -d "$dest" ]]; then
+        printf "    ${GREEN}✓${RESET} %-16s ${DIM}copy${RESET}\n" "$skill"
+      fi
+    done
+    printf "\n"
+  done < "$REGISTRY_FILE"
 }
 
 # ─── CLI argument parsing (non-interactive mode) ────────────────────
@@ -744,7 +678,7 @@ Options:
   --target <name>    Install target (default: claude)
                      Supported: claude, cursor, antigravity, openclaw, gemini, universal
   --path <dir>       Install to a custom path (overrides --target)
-  --method <type>    Install method: symlink or copy (default: symlink)
+  --method <type>    Install method: copy (default) or symlink
   --skill <name>     Skill to install (repeatable, default: all)
   --update           Update all copied skills from their source repo
   --status           Show all installed skills and their status
@@ -754,7 +688,7 @@ Options:
 Examples:
   $(basename "$0")                           # Interactive mode
   $(basename "$0") --target cursor           # Install to Cursor skills dir
-  $(basename "$0") --method copy             # Copy instead of symlink
+  $(basename "$0") --method symlink           # Symlink instead of copy
   $(basename "$0") --skill todo-manager      # Non-interactive, single skill
   $(basename "$0") --update                  # Update all copied skills
   $(basename "$0") --update --target claude  # Update only Claude Code skills
@@ -876,15 +810,6 @@ main() {
       INSTALL_DIR="$DEFAULT_INSTALL_DIR"
     else
       interactive_select_target
-    fi
-  fi
-
-  # Install method
-  if [[ -z "$INSTALL_METHOD" ]]; then
-    if [[ "$NON_INTERACTIVE" == true ]]; then
-      INSTALL_METHOD="symlink"
-    else
-      interactive_select_method
     fi
   fi
 
