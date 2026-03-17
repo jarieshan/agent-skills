@@ -10,28 +10,60 @@
 
 ## 安装
 
-运行交互式安装脚本，按提示选择 skill 和安装路径：
+### 一键安装（推荐）
+
+无需手动 clone，直接运行：
 
 ```bash
-./install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/jarieshan/agent-skills/main/setup.sh)
 ```
 
-脚本支持键盘交互：↑↓ 移动、Space 切换选中、Enter 确认、a 全选/全不选。
+脚本会自动 clone 仓库到 `~/.config/agent-skills/repo/`，然后启动交互式安装。
+已安装过的用户再次运行会优先提供 Update 选项。
 
-也可以通过参数非交互式安装：
+### 手动安装
 
 ```bash
-# 安装指定 skill 到默认路径 (~/.claude/skills/)
-./install.sh --skill todo-manager
-
-# 指定安装路径
-./install.sh --skill todo-manager --path ~/my-skills
-
-# 查看可用 skills
-./install.sh --list
+git clone https://github.com/jarieshan/agent-skills.git
+cd agent-skills
+./setup.sh
 ```
 
-Skills 通过 symlink 安装，`git pull` 即可更新。
+### 子命令
+
+```bash
+./setup.sh                    # 交互式（已安装则选 Update/Install）
+./setup.sh install             # 安装 skills
+./setup.sh update              # 更新已安装的 skills
+./setup.sh status              # 查看已安装状态
+./setup.sh list                # 列出可用 skills
+./setup.sh clean-backup        # 管理备份
+./setup.sh help                # 查看帮助
+```
+
+### Install 选项
+
+```bash
+./setup.sh install --target cursor      # 安装到 Cursor
+./setup.sh install --skill todo-manager # 非交互式安装指定 skill
+./setup.sh install --path ~/my-skills   # 自定义路径
+./setup.sh install --method symlink     # 软链接模式
+```
+
+### Update 选项
+
+```bash
+./setup.sh update                       # 更新所有
+./setup.sh update --target claude       # 只更新 Claude Code 的 skills
+```
+
+### 远程使用
+
+```bash
+bash <(curl -fsSL .../setup.sh) update
+bash <(curl -fsSL .../setup.sh) install --skill todo-manager
+bash <(curl -fsSL .../setup.sh) status
+```
 
 ## Skill 结构
 
