@@ -287,79 +287,19 @@ draw_target_list() {
 }
 
 # ─── Conflict resolution ────────────────────────────────────────────
-# Compare src and dest, show diff summary, ask user to confirm reinstall
+# Return: 0=skip, 1=update, 2=reinstall
 handle_conflict() {
   local skill="$1" src="$2" dest="$3"
 
   printf "\n  ${YELLOW}!${RESET} ${BOLD}%s${RESET} already exists at ${DIM}%s${RESET}\n\n" "$skill" "$dest"
 
-  # Resolve actual source (follow symlink for comparison)
-  local actual_dest="$dest"
-  [[ -L "$dest" ]] && actual_dest="$(readlink "$dest")"
-
-  # Collect file changes
-  local deleted=() replaced=() added=()
-
-  # Files in dest but not in src → will be deleted
-  while IFS= read -r f; do
-    local rel="${f#$actual_dest/}"
-    if [[ ! -e "$src/$rel" ]]; then
-      deleted+=("$rel")
-    fi
-  done < <(find "$actual_dest" -type f 2>/dev/null | sort)
-
-  # Files in src
-  while IFS= read -r f; do
-    local rel="${f#$src/}"
-    if [[ -e "$actual_dest/$rel" ]]; then
-      if ! diff -q "$f" "$actual_dest/$rel" &>/dev/null; then
-        replaced+=("$rel")
-      fi
-    else
-      added+=("$rel")
-    fi
-  done < <(find "$src" -type f 2>/dev/null | sort)
-
-  # Display changes
-  local has_changes=false
-
-  if [[ ${#deleted[@]} -gt 0 ]]; then
-    has_changes=true
-    printf "  ${RED}Delete:${RESET}\n"
-    for f in "${deleted[@]}"; do
-      printf "    ${RED}-%s${RESET}\n" "$f"
-    done
-  fi
-
-  if [[ ${#replaced[@]} -gt 0 ]]; then
-    has_changes=true
-    printf "  ${YELLOW}Replace:${RESET}\n"
-    for f in "${replaced[@]}"; do
-      printf "    ${YELLOW}~%s${RESET}\n" "$f"
-    done
-  fi
-
-  if [[ ${#added[@]} -gt 0 ]]; then
-    has_changes=true
-    printf "  ${GREEN}Add:${RESET}\n"
-    for f in "${added[@]}"; do
-      printf "    ${GREEN}+%s${RESET}\n" "$f"
-    done
-  fi
-
-  if ! $has_changes; then
-    printf "  ${DIM}No file differences detected.${RESET}\n"
-  fi
-
-  printf "\n"
-
-  # Interactive: ask skip, update, or reinstall
-  # Return: 0=skip, 1=update, 2=reinstall
+  # Non-interactive: always skip
   if [[ "$NON_INTERACTIVE" == true ]]; then
     print_warn "$skill — skipped (use interactive mode to reinstall/update)"
     return 0
   fi
 
+  # Step 1: choose action
   local cursor=0
   local num_opts=3
   local -a opt_names=("Skip" "Update" "Reinstall")
@@ -394,7 +334,66 @@ handle_conflict() {
   tput cnorm 2>/dev/null || true
   printf "\n"
 
+  # Step 2: if reinstall, show diff and confirm Y/N
+  if [[ $cursor -eq 2 ]]; then
+    show_file_diff "$src" "$dest"
+    printf "  ${BOLD}${RED}This will delete the existing directory and reinstall.${RESET}\n"
+    printf "  ${BOLD}Confirm? [y/N]${RESET} "
+    local confirm
+    read -rn1 confirm
+    printf "\n\n"
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+      return 0  # skip
+    fi
+  fi
+
   return "$cursor"  # 0=skip, 1=update, 2=reinstall
+}
+
+# Show file diff between src and dest
+show_file_diff() {
+  local src="$1" dest="$2"
+
+  local actual_dest="$dest"
+  [[ -L "$dest" ]] && actual_dest="$(readlink "$dest")"
+
+  local deleted=() replaced=() added=()
+
+  while IFS= read -r f; do
+    local rel="${f#$actual_dest/}"
+    [[ ! -e "$src/$rel" ]] && deleted+=("$rel")
+  done < <(find "$actual_dest" -type f 2>/dev/null | sort)
+
+  while IFS= read -r f; do
+    local rel="${f#$src/}"
+    if [[ -e "$actual_dest/$rel" ]]; then
+      diff -q "$f" "$actual_dest/$rel" &>/dev/null || replaced+=("$rel")
+    else
+      added+=("$rel")
+    fi
+  done < <(find "$src" -type f 2>/dev/null | sort)
+
+  local has_changes=false
+
+  if [[ ${#deleted[@]} -gt 0 ]]; then
+    has_changes=true
+    printf "  ${RED}Delete:${RESET}\n"
+    for f in "${deleted[@]}"; do printf "    ${RED}-%s${RESET}\n" "$f"; done
+  fi
+  if [[ ${#replaced[@]} -gt 0 ]]; then
+    has_changes=true
+    printf "  ${YELLOW}Replace:${RESET}\n"
+    for f in "${replaced[@]}"; do printf "    ${YELLOW}~%s${RESET}\n" "$f"; done
+  fi
+  if [[ ${#added[@]} -gt 0 ]]; then
+    has_changes=true
+    printf "  ${GREEN}Add:${RESET}\n"
+    for f in "${added[@]}"; do printf "    ${GREEN}+%s${RESET}\n" "$f"; done
+  fi
+  if ! $has_changes; then
+    printf "  ${DIM}No file differences detected.${RESET}\n"
+  fi
+  printf "\n"
 }
 
 draw_conflict_options() {
