@@ -17,6 +17,7 @@ UNCHECKED='○'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_INSTALL_DIR="$HOME/.claude/skills"
 INSTALL_DIR=""
+INSTALL_METHOD=""  # "symlink" or "copy"
 SKILLS=()
 SELECTED=()
 NON_INTERACTIVE=false
@@ -284,7 +285,214 @@ draw_target_list() {
   done
 }
 
+# ─── Install method selector ─────────────────────────────────────────
+METHODS=("Symlink" "Copy")
+METHOD_DESCS=("link to repo, git pull to update" "copy files, independent of repo")
+
+interactive_select_method() {
+  local cursor=0
+  local num=${#METHODS[@]}
+
+  tput civis 2>/dev/null || true
+
+  printf "  ${BOLD}Install method${RESET} ${DIM}(↑↓ move, enter confirm)${RESET}\n\n"
+
+  draw_method_list "$cursor"
+
+  while true; do
+    local key
+    read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        read -rsn2 rest
+        case "$rest" in
+          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+          '[B') (( cursor < num - 1 )) && (( cursor++ )) ;;
+        esac
+        ;;
+      '') break ;;
+    esac
+
+    for (( i=0; i<num; i++ )); do tput cuu1 2>/dev/null; done
+    draw_method_list "$cursor"
+  done
+
+  tput cnorm 2>/dev/null || true
+
+  if [[ $cursor -eq 0 ]]; then
+    INSTALL_METHOD="symlink"
+  else
+    INSTALL_METHOD="copy"
+  fi
+  printf "\n"
+}
+
+draw_method_list() {
+  local cursor=$1
+  for (( i=0; i<${#METHODS[@]}; i++ )); do
+    local radio="${UNCHECKED}" prefix="   " style="" end=""
+    if [[ $i -eq $cursor ]]; then
+      radio="${CHECKED}"
+      prefix="  ${CYAN}${POINTER}${RESET}"
+      style="${BOLD}"
+      end="${RESET}"
+    fi
+    if [[ $i -eq $cursor ]]; then
+      printf "%b ${GREEN}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
+        "$prefix" "$radio" "$style" "${METHODS[$i]}" "$end" "${METHOD_DESCS[$i]}"
+    else
+      printf "%b ${DIM}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
+        "$prefix" "$radio" "$style" "${METHODS[$i]}" "$end" "${METHOD_DESCS[$i]}"
+    fi
+  done
+}
+
+# ─── Conflict resolution ────────────────────────────────────────────
+# Compare src and dest, show diff summary, ask user to confirm reinstall
+handle_conflict() {
+  local skill="$1" src="$2" dest="$3"
+
+  printf "\n  ${YELLOW}!${RESET} ${BOLD}%s${RESET} already exists at ${DIM}%s${RESET}\n\n" "$skill" "$dest"
+
+  # Resolve actual source (follow symlink for comparison)
+  local actual_dest="$dest"
+  [[ -L "$dest" ]] && actual_dest="$(readlink "$dest")"
+
+  # Collect file changes
+  local deleted=() replaced=() added=()
+
+  # Files in dest but not in src → will be deleted
+  while IFS= read -r f; do
+    local rel="${f#$actual_dest/}"
+    if [[ ! -e "$src/$rel" ]]; then
+      deleted+=("$rel")
+    fi
+  done < <(find "$actual_dest" -type f 2>/dev/null | sort)
+
+  # Files in src
+  while IFS= read -r f; do
+    local rel="${f#$src/}"
+    if [[ -e "$actual_dest/$rel" ]]; then
+      if ! diff -q "$f" "$actual_dest/$rel" &>/dev/null; then
+        replaced+=("$rel")
+      fi
+    else
+      added+=("$rel")
+    fi
+  done < <(find "$src" -type f 2>/dev/null | sort)
+
+  # Display changes
+  local has_changes=false
+
+  if [[ ${#deleted[@]} -gt 0 ]]; then
+    has_changes=true
+    printf "  ${RED}Delete:${RESET}\n"
+    for f in "${deleted[@]}"; do
+      printf "    ${RED}-%s${RESET}\n" "$f"
+    done
+  fi
+
+  if [[ ${#replaced[@]} -gt 0 ]]; then
+    has_changes=true
+    printf "  ${YELLOW}Replace:${RESET}\n"
+    for f in "${replaced[@]}"; do
+      printf "    ${YELLOW}~%s${RESET}\n" "$f"
+    done
+  fi
+
+  if [[ ${#added[@]} -gt 0 ]]; then
+    has_changes=true
+    printf "  ${GREEN}Add:${RESET}\n"
+    for f in "${added[@]}"; do
+      printf "    ${GREEN}+%s${RESET}\n" "$f"
+    done
+  fi
+
+  if ! $has_changes; then
+    printf "  ${DIM}No file differences detected.${RESET}\n"
+  fi
+
+  printf "\n"
+
+  # Interactive: ask skip or reinstall
+  if [[ "$NON_INTERACTIVE" == true ]]; then
+    print_warn "$skill — skipped (use interactive mode to reinstall)"
+    return 1
+  fi
+
+  local cursor=0
+  local options=("Skip" "Reinstall")
+
+  tput civis 2>/dev/null || true
+  printf "  ${BOLD}Action?${RESET} ${DIM}(↑↓ move, enter confirm)${RESET}\n\n"
+
+  draw_conflict_options "$cursor"
+
+  while true; do
+    local key
+    read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        read -rsn2 rest
+        case "$rest" in
+          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+          '[B') (( cursor < 1 )) && (( cursor++ )) ;;
+        esac
+        ;;
+      '') break ;;
+    esac
+    for (( j=0; j<2; j++ )); do tput cuu1 2>/dev/null; done
+    draw_conflict_options "$cursor"
+  done
+
+  tput cnorm 2>/dev/null || true
+  printf "\n"
+
+  if [[ $cursor -eq 0 ]]; then
+    return 1  # skip
+  fi
+
+  # Reinstall: remove old, return 0 to proceed
+  rm -rf "$dest"
+  return 0
+}
+
+draw_conflict_options() {
+  local cursor=$1
+  local options=("Skip" "Reinstall")
+  for (( j=0; j<2; j++ )); do
+    local radio="${UNCHECKED}" prefix="   " style="" end=""
+    if [[ $j -eq $cursor ]]; then
+      radio="${CHECKED}"
+      prefix="  ${CYAN}${POINTER}${RESET}"
+      style="${BOLD}"
+      end="${RESET}"
+    fi
+    if [[ $j -eq 0 ]]; then
+      local desc="keep existing, do nothing"
+    else
+      local desc="remove existing and install fresh"
+    fi
+    if [[ $j -eq $cursor ]]; then
+      printf "%b ${GREEN}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
+        "$prefix" "$radio" "$style" "${options[$j]}" "$end" "$desc"
+    else
+      printf "%b ${DIM}%s${RESET} %b%s%b ${DIM}— %s${RESET}\n" \
+        "$prefix" "$radio" "$style" "${options[$j]}" "$end" "$desc"
+    fi
+  done
+}
+
 # ─── Install logic ──────────────────────────────────────────────────
+do_install() {
+  local src="$1" dest="$2"
+  if [[ "$INSTALL_METHOD" == "symlink" ]]; then
+    ln -s "$src" "$dest"
+  else
+    cp -R "$src" "$dest"
+  fi
+}
+
 install_skills() {
   local count=0
 
@@ -295,8 +503,9 @@ install_skills() {
     local src="$SCRIPT_DIR/$skill"
     local dest="$INSTALL_DIR/$skill"
 
-    if [[ -e "$dest" ]]; then
-      if [[ -L "$dest" ]]; then
+    if [[ -e "$dest" || -L "$dest" ]]; then
+      # Exact same symlink already exists
+      if [[ -L "$dest" && "$INSTALL_METHOD" == "symlink" ]]; then
         local current_target
         current_target="$(readlink "$dest")"
         if [[ "$current_target" == "$src" ]]; then
@@ -305,17 +514,32 @@ install_skills() {
           continue
         fi
       fi
-      print_warn "$skill — $dest already exists, skipping (remove it first to reinstall)"
+
+      # Conflict: ask user
+      if handle_conflict "$skill" "$src" "$dest"; then
+        do_install "$src" "$dest"
+        print_success "$skill — reinstalled"
+        (( count++ ))
+      else
+        print_info "$skill — skipped"
+      fi
       continue
     fi
 
-    ln -s "$src" "$dest"
+    do_install "$src" "$dest"
     print_success "$skill — installed"
     (( count++ ))
   done
 
+  local method_label="symlinked"
+  [[ "$INSTALL_METHOD" == "copy" ]] && method_label="copied"
+
   printf "\n  ${BOLD}${GREEN}Done!${RESET} Installed ${BOLD}${count}${RESET} skill(s) to ${DIM}${INSTALL_DIR}${RESET}\n"
-  printf "  ${DIM}Skills are symlinked — git pull to update.${RESET}\n\n"
+  if [[ "$INSTALL_METHOD" == "symlink" ]]; then
+    printf "  ${DIM}Skills are symlinked — git pull to update.${RESET}\n\n"
+  else
+    printf "  ${DIM}Skills are copied — re-run installer to update.${RESET}\n\n"
+  fi
 }
 
 # ─── CLI argument parsing (non-interactive mode) ────────────────────
@@ -329,6 +553,7 @@ Options:
   --target <name>    Install target (default: claude)
                      Supported: claude, cursor, antigravity, openclaw, gemini, universal
   --path <dir>       Install to a custom path (overrides --target)
+  --method <type>    Install method: symlink or copy (default: symlink)
   --skill <name>     Skill to install (repeatable, default: all)
   --list             List available skills and exit
   -h, --help         Show this help
@@ -336,8 +561,8 @@ Options:
 Examples:
   $(basename "$0")                           # Interactive mode
   $(basename "$0") --target cursor           # Install to Cursor skills dir
+  $(basename "$0") --method copy             # Copy instead of symlink
   $(basename "$0") --skill todo-manager      # Non-interactive, single skill
-  $(basename "$0") --path ~/my-skills        # Custom path
 EOF
   exit 0
 }
@@ -358,6 +583,16 @@ parse_args() {
         ;;
       --path)
         INSTALL_DIR="${2/#\~/$HOME}"
+        shift 2
+        ;;
+      --method)
+        case "$2" in
+          symlink|copy) INSTALL_METHOD="$2" ;;
+          *)
+            print_error "Unknown method: $2 (supported: symlink, copy)"
+            exit 1
+            ;;
+        esac
         shift 2
         ;;
       --skill)
@@ -430,6 +665,15 @@ main() {
       INSTALL_DIR="$DEFAULT_INSTALL_DIR"
     else
       interactive_select_target
+    fi
+  fi
+
+  # Install method
+  if [[ -z "$INSTALL_METHOD" ]]; then
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+      INSTALL_METHOD="symlink"
+    else
+      interactive_select_method
     fi
   fi
 
