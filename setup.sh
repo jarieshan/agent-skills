@@ -74,13 +74,20 @@ bootstrap() {
 
   if [[ -d "$CACHE_DIR/.git" ]]; then
     print_info "Updating local cache (${CACHE_DIR/#$HOME/~})..."
-    git -C "$CACHE_DIR" fetch --quiet origin "$REPO_BRANCH" 2>/dev/null
-    git -C "$CACHE_DIR" reset --quiet --hard "origin/$REPO_BRANCH" 2>/dev/null
-    print_success "Repo updated to latest."
+    if git -C "$CACHE_DIR" fetch --quiet origin "$REPO_BRANCH" 2>/dev/null \
+       && git -C "$CACHE_DIR" reset --quiet --hard "origin/$REPO_BRANCH" 2>/dev/null; then
+      print_success "Repo updated to latest."
+    else
+      # Cache is stale (e.g. branch renamed), re-clone
+      print_warn "Cache outdated, re-cloning..."
+      rm -rf "$CACHE_DIR"
+      git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$CACHE_DIR"
+      print_success "Repo re-cloned."
+    fi
   else
     print_info "Cloning repo to ${CACHE_DIR/#$HOME/~}..."
     mkdir -p "$(dirname "$CACHE_DIR")"
-    git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$CACHE_DIR" 2>/dev/null
+    git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$CACHE_DIR"
     print_success "Repo cloned."
   fi
   printf "\n"
