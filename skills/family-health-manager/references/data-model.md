@@ -2,7 +2,7 @@
 
 ## 项目根目录
 
-默认将 Google Drive `/Family Health Data` 视为唯一项目根目录。
+默认将 `config.json` 中 `data_root` 指定的路径视为唯一项目根目录。
 
 推荐结构：
 
