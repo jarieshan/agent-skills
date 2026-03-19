@@ -133,13 +133,13 @@ tui_single_select() {
 
   while true; do
     local key
-    read -rsn1 key
+    IFS= read -rsn1 key
     case "$key" in
       $'\x1b')
         read -rsn2 rest
         case "$rest" in
-          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < count - 1 )) && (( cursor++ )) ;;
+          '[A') [[ $cursor -gt 0 ]] && cursor=$((cursor - 1)) || true ;;
+          '[B') [[ $cursor -lt $((count - 1)) ]] && cursor=$((cursor + 1)) || true ;;
         esac
         ;;
       '') break ;;
@@ -169,13 +169,13 @@ interactive_select_skills() {
 
   while true; do
     local key
-    read -rsn1 key
+    IFS= read -rsn1 key
     case "$key" in
       $'\x1b')
         read -rsn2 rest
         case "$rest" in
-          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < ${#SKILLS[@]} - 1 )) && (( cursor++ )) ;;
+          '[A') [[ $cursor -gt 0 ]] && cursor=$((cursor - 1)) || true ;;
+          '[B') [[ $cursor -lt $((${#SKILLS[@]} - 1)) ]] && cursor=$((cursor + 1)) || true ;;
         esac
         ;;
       ' ')
@@ -279,13 +279,13 @@ interactive_select_target() {
 
   while true; do
     local key
-    read -rsn1 key
+    IFS= read -rsn1 key
     case "$key" in
       $'\x1b')
         read -rsn2 rest
         case "$rest" in
-          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < num_targets - 1 )) && (( cursor++ )) ;;
+          '[A') [[ $cursor -gt 0 ]] && cursor=$((cursor - 1)) || true ;;
+          '[B') [[ $cursor -lt $((num_targets - 1)) ]] && cursor=$((cursor + 1)) || true ;;
         esac
         ;;
       '') break ;;
@@ -371,13 +371,13 @@ interactive_select_mode() {
 
   while true; do
     local key
-    read -rsn1 key
+    IFS= read -rsn1 key
     case "$key" in
       $'\x1b')
         read -rsn2 rest
         case "$rest" in
-          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < num_modes - 1 )) && (( cursor++ )) ;;
+          '[A') [[ $cursor -gt 0 ]] && cursor=$((cursor - 1)) || true ;;
+          '[B') [[ $cursor -lt $((num_modes - 1)) ]] && cursor=$((cursor + 1)) || true ;;
         esac
         ;;
       '') break ;;
@@ -417,13 +417,13 @@ handle_conflict() {
 
   while true; do
     local key
-    read -rsn1 key
+    IFS= read -rsn1 key
     case "$key" in
       $'\x1b')
         read -rsn2 rest
         case "$rest" in
-          '[A') (( cursor > 0 )) && (( cursor-- )) ;;
-          '[B') (( cursor < 2 )) && (( cursor++ )) ;;
+          '[A') [[ $cursor -gt 0 ]] && cursor=$((cursor - 1)) || true ;;
+          '[B') [[ $cursor -lt 2 ]] && cursor=$((cursor + 1)) || true ;;
         esac
         ;;
       '') break ;;
@@ -605,7 +605,7 @@ install_skills() {
         current_target="$(readlink "$dest")"
         if [[ "$current_target" == "$src" ]]; then
           print_info "$skill — already linked, skipped"
-          (( count++ ))
+          count=$((count + 1))
           continue
         fi
       fi
@@ -618,14 +618,14 @@ install_skills() {
           do_update "$src" "$dest"
           registry_add "$dest"
           print_success "$skill — updated"
-          (( count++ ))
+          count=$((count + 1))
           ;;
         2)
           rm -rf "$dest"
           do_install "$skill" "$src" "$dest"
           registry_add "$dest"
           print_success "$skill — reinstalled"
-          (( count++ ))
+          count=$((count + 1))
           ;;
       esac
       continue
@@ -634,7 +634,7 @@ install_skills() {
     do_install "$skill" "$src" "$dest"
     registry_add "$dest"
     print_success "$skill — installed"
-    (( count++ ))
+    count=$((count + 1))
   done
 
   printf "\n  ${BOLD}${GREEN}Done!${RESET} Installed ${BOLD}${count}${RESET} skill(s) to ${DIM}${INSTALL_DIR}${RESET}\n"
@@ -876,7 +876,7 @@ cmd_update() {
   for (( i=0; i<${#update_dests[@]}; i++ )); do
     do_update "${update_srcs[$i]}" "${update_dests[$i]}"
     print_success "${update_names[$i]} — updated"
-    (( updated++ ))
+    updated=$((updated + 1))
   done
 
   printf "\n  ${BOLD}${GREEN}Done!${RESET} ${BOLD}${updated}${RESET}/${BOLD}${total}${RESET} skill(s) updated.\n\n"
