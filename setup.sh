@@ -581,12 +581,40 @@ do_update() {
     rm "$dest"
     cp -R "$old_target" "$dest"
   fi
+
+  local tmp_dir="$dest/.tmp"
+  mkdir -p "$tmp_dir"
+
+  # Move conflicting dest files to .tmp before overwriting
+  while IFS= read -r f; do
+    local rel="${f#$src/}"
+    local dest_file="$dest/$rel"
+    if [[ -e "$dest_file" ]] && ! diff -q "$f" "$dest_file" &>/dev/null; then
+      local tmp_file="$tmp_dir/$rel"
+      mkdir -p "$(dirname "$tmp_file")"
+      mv "$dest_file" "$tmp_file"
+    fi
+  done < <(find "$src" -type f 2>/dev/null)
+
+  # Copy source files into dest
   while IFS= read -r f; do
     local rel="${f#$src/}"
     local dest_file="$dest/$rel"
     mkdir -p "$(dirname "$dest_file")"
     cp "$f" "$dest_file"
   done < <(find "$src" -type f 2>/dev/null)
+
+  # Restore user files from .tmp back to dest
+  if [[ -d "$tmp_dir" ]]; then
+    while IFS= read -r f; do
+      local rel="${f#$tmp_dir/}"
+      local dest_file="$dest/$rel"
+      mv "$f" "$dest_file"
+    done < <(find "$tmp_dir" -type f 2>/dev/null)
+    # Clean up empty .tmp directory
+    find "$tmp_dir" -depth -type d -empty -delete 2>/dev/null
+    rmdir "$tmp_dir" 2>/dev/null || true
+  fi
 }
 
 install_skills() {
@@ -757,6 +785,17 @@ cmd_update() {
       *) print_error "Unknown option: $1"; cmd_help; exit 1 ;;
     esac
   done
+
+  # Pull latest from remote before comparing
+  if [[ -d "$SCRIPT_DIR/.git" ]]; then
+    print_info "Pulling latest changes from remote..."
+    if git -C "$SCRIPT_DIR" pull --quiet 2>/dev/null; then
+      print_success "Repo updated to latest."
+    else
+      print_warn "Could not pull latest changes. Continuing with local copy."
+    fi
+    printf "\n"
+  fi
 
   discover_skills
   ensure_registry
